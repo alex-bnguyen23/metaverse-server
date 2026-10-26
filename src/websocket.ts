@@ -4,18 +4,22 @@ import { WebSocket, WebSocketServer } from 'ws';
 import { createPlayer, applyPlayerMovement, parseClientMessage, type PlayerState } from './game.js';
 import { logger } from './utils/logger.js';
 import { createChatMessage } from './chat.js';
+import { SharedVehicle } from './vehicle.js';
 
 const MAX_PLAYERS = 5;
 /** Attach the single shared world to / on the existing HTTP server. */
 export function initializeWebSocket(server: Server): WebSocketServer {
   const wss = new WebSocketServer({ server, path: '/', maxPayload: 4096 });
   const players = new Map<string, PlayerState>();
+  const vehicle = new SharedVehicle();
   const sessions = new Map<
     WebSocket,
     {
       player?: PlayerState;
       lastSequence: number;
       movementTimes: number[];
+      vehicleMovementTimes: number[];
+      vehicleRequestTimes: number[];
       alive: boolean;
       messages: number;
       lastChatAt: number;
@@ -45,9 +49,14 @@ export function initializeWebSocket(server: Server): WebSocketServer {
   }
 
   // Explicit errors let clients handle rejected requests using the documented protocol.
-  function reject(socket: WebSocket, code: string, message: string): void {
+  function reject(
+    socket: WebSocket,
+    code: string,
+    message: string,
+    context: { requestType?: string; vehicleId?: string; revision?: number } = {},
+  ): void {
     logger.warn({ code }, 'WebSocket request rejected');
-    send(socket, JSON.stringify({ type: 'server:error', payload: { code, message } }));
+    send(socket, JSON.stringify({ type: 'server:error', payload: { code, message, ...context } }));
   }
 
   wss.on('connection', (socket) => {
@@ -62,6 +71,8 @@ export function initializeWebSocket(server: Server): WebSocketServer {
       player: undefined as PlayerState | undefined,
       lastSequence: -1,
       movementTimes: [] as number[],
+      vehicleMovementTimes: [] as number[],
+      vehicleRequestTimes: [] as number[],
       alive: true,
       messages: 0,
       lastChatAt: -Infinity,
@@ -76,6 +87,8 @@ export function initializeWebSocket(server: Server): WebSocketServer {
       socket.terminate();
     });
     socket.on('message', (raw, binary) => {
+      // Ignore queued traffic after a policy close or termination has begun.
+      if (socket.readyState !== WebSocket.OPEN) return;
       // Limit work per connection as well as payload size; malformed traffic never mutates state.
       if (++session.messages > 120 || binary) {
         reject(socket, 'INVALID_MESSAGE', 'Invalid message or rate limit.');
@@ -100,7 +113,7 @@ export function initializeWebSocket(server: Server): WebSocketServer {
         return;
       }
       if (message.type !== 'player:join' && !session.player) {
-        reject(socket, 'NOT_JOINED', 'Join before sending movement or chat.');
+        reject(socket, 'NOT_JOINED', 'Join before sending world or chat requests.');
         return;
       }
       if (message.type === 'player:join') {
@@ -112,7 +125,11 @@ export function initializeWebSocket(server: Server): WebSocketServer {
           socket,
           JSON.stringify({
             type: 'world:init',
-            payload: { playerId: player.id, players: [...players.values()] },
+            payload: {
+              playerId: player.id,
+              players: [...players.values()],
+              vehicles: [vehicle.state],
+            },
           }),
         );
         broadcast('player:joined', { player }, socket);
@@ -133,6 +150,65 @@ export function initializeWebSocket(server: Server): WebSocketServer {
         return;
       }
       if (!session.player) return;
+      if (
+        message.type === 'vehicle:enter' ||
+        message.type === 'vehicle:exit' ||
+        message.type === 'vehicle:move'
+      ) {
+        const context = {
+          requestType: message.type,
+          vehicleId: message.payload.vehicleId,
+          revision: vehicle.state.revision,
+        };
+        const moving = message.type === 'vehicle:move';
+        const now = performance.now();
+        const times = (moving ? session.vehicleMovementTimes : session.vehicleRequestTimes).filter(
+          (time) => now - time < 1000,
+        );
+        if (moving) session.vehicleMovementTimes = times;
+        else session.vehicleRequestTimes = times;
+        // Charge attempts, including rejections, to bound repeated occupancy checks.
+        if (times.length >= (moving ? 20 : 2)) {
+          reject(
+            socket,
+            'RATE_LIMITED',
+            moving
+              ? 'Maximum 20 vehicle updates per second.'
+              : 'Maximum 2 vehicle enter/exit requests per second.',
+            context,
+          );
+          return;
+        }
+        times.push(now);
+        const code = vehicle.apply(session.player, message);
+        if (code) {
+          reject(socket, code, 'Vehicle request rejected.', context);
+          return;
+        }
+        // Synchronous validation and mutation complete before any occupancy broadcast.
+        if (message.type === 'vehicle:enter')
+          broadcast('vehicle:occupied', { vehicle: vehicle.state });
+        else if (message.type === 'vehicle:exit')
+          broadcast('vehicle:released', {
+            vehicle: vehicle.state,
+            player: session.player,
+            reason: 'exit',
+          });
+        else
+          broadcast('vehicle:update', {
+            vehicle: vehicle.state,
+            sequence: message.payload.sequence,
+          });
+        return;
+      }
+      if (vehicle.state.driverId === session.player.id) {
+        reject(socket, 'PLAYER_DRIVING', 'Walking is disabled while driving.', {
+          requestType: message.type,
+          vehicleId: vehicle.state.id,
+          revision: vehicle.state.revision,
+        });
+        return;
+      }
       // A session owns its ID; stale packets cannot overwrite its latest reported state.
       if (message.payload.sequence <= session.lastSequence) {
         reject(socket, 'INVALID_MESSAGE', 'Movement sequence must increase.');
@@ -156,6 +232,15 @@ export function initializeWebSocket(server: Server): WebSocketServer {
       clearTimeout(joinTimeout);
       sessions.delete(socket);
       if (!session.player) return;
+      // Release before player:left so peers never retain an occupant that no longer exists.
+      if (vehicle.state.driverId === session.player.id) {
+        vehicle.release();
+        broadcast('vehicle:released', {
+          vehicle: vehicle.state,
+          player: null,
+          reason: 'disconnect',
+        });
+      }
       players.delete(session.player.id);
       broadcast('player:left', { id: session.player.id });
       logger.info({ playerId: session.player.id }, 'Player disconnected');

@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { parseChatPayload, type ChatSendPayload } from './chat.js';
+import { parseVehicleMessage, type VehicleMessage } from './vehicle.js';
 
 export type Appearance = {
   shirt: 0 | 1 | 2;
@@ -28,6 +29,7 @@ export type PlayerMovement = {
   animation: AnimationState;
 };
 export type ClientMessage =
+  | VehicleMessage
   | { type: 'player:join'; payload: { name: string; appearance: Appearance } }
   | { type: 'player:move'; payload: PlayerMovement }
   | { type: 'chat:send'; payload: ChatSendPayload };
@@ -40,6 +42,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 export function parseClientMessage(value: unknown): ClientMessage | undefined {
   if (!isRecord(value) || !isRecord(value.payload)) return;
   const data = value.payload;
+  if (typeof value.type === 'string' && value.type.startsWith('vehicle:')) {
+    return parseVehicleMessage(value.type, data);
+  }
   if (value.type === 'chat:send') {
     const payload = parseChatPayload(data);
     return payload ? { type: 'chat:send', payload } : undefined;
