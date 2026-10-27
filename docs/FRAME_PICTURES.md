@@ -2,19 +2,7 @@
 
 ## Status and scope
 
-This document specifies the HTTP API implemented by this Node.js backend. The frontend `FramePictures.ts` must be updated separately to use these endpoints; frontend integration is not included in this repository.
-
-## Backend implementation and configuration
-
-- `src/routes/frame-pictures.ts` wires the three HTTP endpoints into Express.
-- `src/middlewares/image-upload.ts` handles Multer memory uploads, multipart validation, byte limits, rate/concurrency limits, and JSON errors.
-- `src/controllers/frame-pictures.ts` handles HTTP responses and delegates image processing and storage to `src/services/frame-pictures.ts`.
-- Multer accepts exactly one `image` file up to 10 MiB. Sharp validates decoded content and generates the normalized JPEG asynchronously. Multipart transfer has a 30-second timeout and JPEG processing has a 15-second decoder timeout.
-- Set `FRAME_PICTURES_DIR` to persistent storage in production. Local development defaults to `data/frame-pictures` inside the project, which is ignored by Git. Use a single server instance. Windows does not support the POSIX directory flush used for durable renames; production durability assumes a POSIX persistent filesystem.
-- Set `FRONTEND_ORIGINS` to a comma-separated list of allowed frontend origins, for example `http://localhost:5173,https://game.example.com`. Cross-origin access to this API is disabled unless configured. Existing unrelated HTTP routes retain their CORS behavior.
-- Express proxy trust remains disabled by default. Configure only known trusted proxy addresses in `src/app.ts` for the deployment before relying on per-visitor IP limits behind a proxy.
-- Metadata operations share one in-process queue. Storage reads clean temporary files, orphan images and older revisions after 60 seconds while retaining the current and immediately previous images. A crash-created orphan at the next revision can temporarily block replacements until this grace period expires. Malformed/missing committed metadata fails closed.
-- `npm test` includes HTTP upload, normalization, rejection, rate-limit, persistence, and concurrent commit checks. Frontend behavior and deployment-level crash recovery still require integration verification.
+This document specifies the HTTP API to implement in the separate Node.js backend. The frontend now uses this contract through `src/network/framePictures.ts` and `FramePictures.ts`. The separate backend must implement these endpoints before shared uploads work. Backend implementation has not been verified in this project.
 
 Any visitor may upload or replace either picture. Both frames belong to the one shared world, independent of player sessions and the five-player room limit. Everyone loads the latest committed image. No Firebase, database, new room, or additional WebSocket connection is required.
 
@@ -32,6 +20,7 @@ export type FramePicture = {
   revision: number;
   imageUrl: string | null;
   updatedAt: number | null;
+  mediaType?: 'image' | 'video'; // Omitted by legacy image-only backends.
 };
 
 export type FramePicturesResponse = {
@@ -85,7 +74,7 @@ Read both records from one consistent committed metadata snapshot. A frame witho
 
 Public upload-and-replace endpoint. No login or joined WebSocket session is required in this initial version. Any visitor can replace either frame, as requested. Apply the same file validation and rate limits to all visitors.
 
-Request: `multipart/form-data` containing exactly one file field named `image`. Do not accept extra files or form fields. The browser must generate the multipart boundary; do not manually set the `Content-Type` header when sending `FormData`.
+Request: `multipart/form-data` containing exactly one file field named `image` (this legacy field name also carries video files). Do not accept extra files or form fields. The browser must generate the multipart boundary; do not manually set the `Content-Type` header when sending `FormData`.
 
 ```ts
 const form = new FormData();
@@ -117,7 +106,7 @@ Serve the backend-generated JPEG for a committed revision. Accept only a valid f
 
 Return `404 IMAGE_NOT_FOUND` if that revision is unavailable. Retain the current image and at least the immediately previous committed revision per frame to accommodate in-flight metadata reads. Older revisions may be deleted after a grace period of at least 60 seconds. Clients encountering a missing old revision refetch metadata and load the current URL. This is a current-picture feature, not permanent upload history.
 
-## Server validation and limits
+## Image validation and limits
 
 - Allow only JPEG, PNG and WebP input. Check decoded content as well as declared MIME type; do not trust extensions, filenames or headers alone. Reject SVG, HTML, animated images, malformed files and unsupported formats.
 - Limit the uploaded file to 10 MiB (10,485,760 bytes). Enforce a streaming request limit of 11 MiB including multipart overhead, and abort oversized requests early. Reject zero-byte files, duplicate `image` fields, extra fields, extra files and malformed multipart bodies.
@@ -167,7 +156,11 @@ For Render, attach a persistent disk to the paid backend web service and point `
 
 Serve the API and images over HTTPS in production. If frontend and backend origins differ, configure an explicit frontend origin allowlist for CORS, allow `GET`, `PUT` and `OPTIONS`, and allow the `Content-Type` header. Return CORS headers on image responses and errors too; expose `Retry-After` to browsers. Add `Vary: Origin` when dynamically selecting an allowed origin. No cookies or credentials are required by this anonymous contract. CORS is browser access control, not authentication.
 
-## Frontend integration required after backend implementation
+## Frontend integration
+
+Upload image / Change image controls are centered above the wooden frame's top edge with an 8-pixel gap, leaving the picture unobstructed. Visibility and occlusion checks still use the picture itself.
+
+Upload progress, success and errors use React Toastify through a controller-owned notification. Success and errors close after 5 seconds; progress stays until completion. Cleanup dismisses the controller toast when leaving the world. Background refresh failures remain console-only.
 
 1. Configure `VITE_API_URL` as the HTTP(S) API origin, for example `https://your-backend.onrender.com`; use `http://localhost:3000` for local development. Keep it separate from `VITE_WS_URL` and do not assume the frontend host serves the API.
 2. Fetch `GET /api/frame-pictures` after world loading. Poll every 5 seconds while the page is visible, without overlapping requests; refetch immediately on page visibility restoration. Fetch regardless of WebSocket connection status. Retry transient failures on the next poll and keep the last valid artwork.
@@ -176,6 +169,8 @@ Serve the API and images over HTTPS in production. If frontend and backend origi
 5. Stop using browser localStorage as the artwork source. Never auto-upload old `osaka-frame-v1-left` or `osaka-frame-v1-right` data; those personal choices must not overwrite shared artwork on join. A zero revision displays the original GLB artwork.
 6. Keep separate cloned materials for the two picture meshes. Use sRGB textures and the GLTF UV orientation (`flipY: false`), configure anonymous cross-origin image loading, and dispose replaced textures. Preserve original shared GLB resources for scene cleanup.
 7. Abort fetches, cancel poll timers/listeners and ignore pending image loads on unmount. Keep network traffic and texture updates independent of React's animation loop. Never reload the full GLB to update artwork.
+
+Background metadata refresh and image download failures, including missing files, are logged to the browser console only. Keep the original or last valid artwork visible and retry automatically without an on-screen warning. Upload validation and upload request errors remain visible because they directly respond to a visitor's action. Empty zero-revision records require no warning.
 
 ## Backend acceptance checks
 
@@ -189,3 +184,48 @@ Serve the API and images over HTTPS in production. If frontend and backend origi
 - Versioned URLs do not return stale overwritten content. A missing old image triggers metadata refresh; cleanup preserves current and immediately previous images.
 
 Backend implementation and frontend integration must each be tested before describing this contract as supported.
+
+## Frontend verification
+
+Run `node --test tests/framePictures.test.mjs` for response validation and HTTP upload contract checks. Set `VITE_API_URL` in `.env.local` to the backend HTTP(S) origin and restart Vite; set the same variable in the deployment build environment. The default is `http://localhost:3000`, including when no production value is configured. For production, configure an HTTPS backend origin explicitly. Metadata and media loads time out after 30 seconds; uploads time out after 120 seconds and polling pauses while the page is hidden. Existing browser-local pictures are ignored and never uploaded automatically.
+
+## Video extension
+
+The frontend accepts JPEG/PNG/WebP images up to 10 MiB and H.264 MP4 videos up to 50 MiB. It uses the same PUT endpoint and multipart field `image` for both media types. This is an additive contract: legacy image records without `mediaType` still work. Videos are stored directly without FFmpeg or FFprobe; WebM is not accepted.
+
+For a video, return `mediaType: "video"` and put its root-relative URL in the existing `imageUrl` field. The legacy field name is retained to avoid renaming existing image payloads. Example:
+
+```json
+{
+  "frame": {
+    "frameId": "left",
+    "revision": 3,
+    "mediaType": "video",
+    "imageUrl": "/api/frame-pictures/left/videos/3.mp4",
+    "updatedAt": 1793059320000
+  }
+}
+```
+
+Images may return `mediaType: "image"` or omit it. Their existing JPEG URLs stay unchanged. An empty record has revision zero, null URL/timestamp, and omitted or image mediaType. Revisions increase across image-to-video and video-to-image replacements; a frame has exactly one current medium. Metadata commits, durable storage and cleanup rules apply to both types.
+
+For video uploads, enforce a 50 MiB file limit and a 51 MiB total streaming request limit. Accept only non-fragmented MP4 with one H.264 (avc1) video track. Validate bounded MP4 box structure, MP4 brands, movie duration, video sample-entry dimensions and AVC configuration presence instead of trusting MIME type or filename. Reject malformed headers with `400 INVALID_VIDEO`, unsupported containers/codecs with `415 UNSUPPORTED_MEDIA_TYPE`, and declared duration over 60 seconds or dimensions over 3840 by 2160 with `413 VIDEO_TOO_LARGE`. Retain the previous committed media on failure. Existing image limits and errors remain unchanged.
+
+Store accepted video bytes unchanged. No external video programs or npm media dependencies are required. Header validation does not decode video samples or prove playability: corrupt samples or inaccurate metadata may pass. The backend does not resize, letterbox, limit frame rate, remove audio/metadata, or move MP4 metadata. Export browser-compatible H.264 MP4 before upload, preferably with fast-start metadata. The frontend must mute playback and fit the original aspect ratio itself. Audio and metadata remain downloadable in the original file. Keep the shared upload rate and concurrency limits.
+
+Serve `GET /api/frame-pictures/:frameId/videos/:revision.mp4` as `video/mp4` with immutable caching and nosniff. Support GET/HEAD, byte ranges (`Accept-Ranges: bytes`, 206 with Content-Range for valid ranges, 416 for unsatisfiable ranges), and CORS on all responses. Allow the Range request header in cross-origin preflight; expose Accept-Ranges, Content-Range, Content-Length and Retry-After. Return `404 IMAGE_NOT_FOUND` for missing revisions, retaining the existing API error shape.
+
+The frontend streams versioned videos directly into a Three.js VideoTexture. Playback is muted, looping and inline, with no audio controls or shared playback clock. Visitors see the same clip but are not synchronized to the same timestamp. Playback pauses while the page is hidden and resumes on return. Video fetch/decode/autoplay errors remain console-only and preserve the previous medium; polling retries unsuccessful revisions. Replacing a clip or leaving the world pauses and detaches video sources, disposes textures and aborts pending loads. Upload and change controls remain above the frame and use Toastify for upload results.
+
+Verify with the extended backend: image-to-video-to-image replacement, two simultaneous visitors, H.264 MP4 input, WebM rejection, portrait aspect ratio, muted looping on mobile, range delivery, hidden-page pause/resume, invalid/oversized/overlong clips, malformed MP4 metadata, stale responses, and leaving during upload/playback. Browser and backend media integration remain manual checks until a compatible server and video fixture are available.
+
+## Backend runtime setup and verification
+
+Configure `FRAME_PICTURES_DIR` on durable storage; local development defaults to
+`data/frame-pictures`. FFmpeg and FFprobe are no longer used, and their environment
+variables can be removed. Existing committed MP4 revisions remain readable.
+
+Run `npm test` for backend checks including direct MP4 upload, metadata limits,
+malformed headers, mixed media persistence, legacy manifests and GET/HEAD/ranges.
+Synthetic metadata fixtures test API validation; they do not verify browser decoding.
+Verify playback using a real H.264 MP4 in the frontend before release.

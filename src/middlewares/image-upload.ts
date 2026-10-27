@@ -4,17 +4,25 @@ import multer from 'multer';
 import { FramePictureError, isFrameId } from '../services/frame-pictures.js';
 import { logger } from '../utils/logger.js';
 
-const parser = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024, files: 1, fields: 0, parts: 1 },
-  fileFilter: (_req, file, callback) => {
-    if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.mimetype)) {
-      callback(new FramePictureError(415, 'UNSUPPORTED_IMAGE_TYPE', 'Use JPEG, PNG or WebP.'));
-      return;
-    }
-    callback(null, true);
-  },
-}).single('image');
+const createParser = (onType: (mime: string) => void) =>
+  multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 50 * 1024 * 1024, files: 1, fields: 0, parts: 1 },
+    fileFilter: (_req, file, callback) => {
+      if (!['image/jpeg', 'image/png', 'image/webp', 'video/mp4'].includes(file.mimetype)) {
+        callback(
+          new FramePictureError(
+            415,
+            'UNSUPPORTED_MEDIA_TYPE',
+            'Use JPEG, PNG, WebP, or H.264 MP4.',
+          ),
+        );
+        return;
+      }
+      onType(file.mimetype);
+      callback(null, true);
+    },
+  }).single('image');
 
 /** Validates frame IDs before any upload work or disk access occurs. */
 export const validateFrame: RequestHandler = (req, _res, next) => {
@@ -65,9 +73,19 @@ export function createUploadGuard(): RequestHandler {
 
 /** Counts all multipart bytes before Multer, including chunked request overhead. */
 export const uploadImage: RequestHandler = (req, res, next) => {
-  const maximum = 11 * 1024 * 1024;
+  let maximum = 51 * 1024 * 1024;
+  const parser = createParser((mime) => {
+    // Once the part headers identify an image, stop its stream at the original limit.
+    if (!mime.startsWith('video/')) maximum = 11 * 1024 * 1024;
+  });
   if (Number(req.headers['content-length']) > maximum) {
-    next(new FramePictureError(413, 'FILE_TOO_LARGE', 'Choose an image up to 10 MiB.'));
+    next(
+      new FramePictureError(
+        413,
+        'FILE_TOO_LARGE',
+        'Choose an image up to 10 MiB or video up to 50 MiB.',
+      ),
+    );
     return;
   }
   if (!req.is('multipart/form-data')) {
@@ -94,7 +112,11 @@ export const uploadImage: RequestHandler = (req, res, next) => {
       bytes += chunk.length;
       callback(
         bytes > maximum
-          ? new FramePictureError(413, 'FILE_TOO_LARGE', 'Choose an image up to 10 MiB.')
+          ? new FramePictureError(
+              413,
+              'FILE_TOO_LARGE',
+              'Choose an image up to 10 MiB or video up to 50 MiB.',
+            )
           : null,
         chunk,
       );
@@ -109,6 +131,17 @@ export const uploadImage: RequestHandler = (req, res, next) => {
   req.once('error', finish);
   parser(limited as unknown as Parameters<RequestHandler>[0], res, (error: unknown) => {
     req.file = (limited as unknown as Parameters<RequestHandler>[0]).file;
+    const file = req.file;
+    // Keep the existing image limit within the larger shared video parser.
+    if (
+      !error &&
+      file &&
+      !file.mimetype.startsWith('video/') &&
+      (file.size > 10 * 1024 * 1024 || bytes > 11 * 1024 * 1024)
+    ) {
+      finish(new FramePictureError(413, 'FILE_TOO_LARGE', 'Choose an image up to 10 MiB.'));
+      return;
+    }
     finish(
       error && !(error instanceof multer.MulterError) && !(error instanceof FramePictureError)
         ? new FramePictureError(400, 'INVALID_UPLOAD', 'Malformed multipart upload.')
@@ -125,7 +158,7 @@ export const framePictureErrors: ErrorRequestHandler = (error: unknown, _req, re
     failure = new FramePictureError(
       error.code === 'LIMIT_FILE_SIZE' ? 413 : 400,
       error.code === 'LIMIT_FILE_SIZE' ? 'FILE_TOO_LARGE' : 'INVALID_UPLOAD',
-      'Send exactly one image up to 10 MiB.',
+      'Send one image up to 10 MiB or video up to 50 MiB.',
     );
   }
   if (!(failure instanceof FramePictureError)) {

@@ -12,9 +12,9 @@ app.use(
   '/api/frame-pictures',
   cors({
     origin: process.env.FRONTEND_ORIGINS?.split(',').map((origin) => origin.trim()) ?? false,
-    methods: ['GET', 'PUT', 'OPTIONS'],
-    allowedHeaders: ['Content-Type'],
-    exposedHeaders: ['Retry-After'],
+    methods: ['GET', 'HEAD', 'PUT', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Range'],
+    exposedHeaders: ['Retry-After', 'Accept-Ranges', 'Content-Range', 'Content-Length'],
   }),
   createFramePictureRouter(),
 );

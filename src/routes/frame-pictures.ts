@@ -18,6 +18,7 @@ export function createFramePictureRouter(
   router.get('/', controller.list);
   router.put('/:frameId', createUploadGuard(), validateFrame, uploadImage, controller.replace);
   router.get('/:frameId/images/:revision.jpg', validateFrame, controller.image);
+  router.get('/:frameId/videos/:revision.mp4', validateFrame, controller.image);
   router.use(framePictureErrors);
   return router;
 }

@@ -460,7 +460,7 @@ Keep the existing multiplayer chat protocol unchanged.
 
 ## Shared Frame Picture HTTP API
 
-The implemented upload-and-replace API is specified in [FRAME_PICTURES.md](FRAME_PICTURES.md). It provides `GET /api/frame-pictures`, `PUT /api/frame-pictures/:frameId` using multipart field `image`, and versioned JPEG downloads. Both `left` and `right` are shared across all visitors; any visitor may upload. Configure durable storage and the frontend origin allowlist as described there. The contract uses HTTP polling and adds no WebSocket events or `world:init` fields. The current frontend remains browser-local until separately integrated with this API.
+The proposed upload-and-replace API is specified in [FRAME_PICTURES.md](FRAME_PICTURES.md). Implement `GET /api/frame-pictures`, `PUT /api/frame-pictures/:frameId` using multipart field `image`, and versioned JPEG/MP4 downloads. Video uploads accept H.264 MP4 up to 50 MiB and store the original bytes after container-header validation, without FFmpeg or FFprobe; WebM uploads are unsupported. The additive video extension uses the same multipart field `image`, with `mediaType: "video"` and a versioned video path in the legacy `imageUrl` response field. Both `left` and `right` are shared across all visitors; any visitor may upload. Persist files and revisions on durable storage. The initial contract uses HTTP polling and adds no WebSocket events or `world:init` fields. The frontend uses this HTTP contract; the separate backend must implement it before shared uploads work.
 
 ## Protocol Compliance
 

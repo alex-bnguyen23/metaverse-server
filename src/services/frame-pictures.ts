@@ -9,6 +9,7 @@ export type FramePicture = {
   revision: number;
   imageUrl: string | null;
   updatedAt: number | null;
+  mediaType?: 'image' | 'video';
 };
 
 /** Carries public error details without exposing decoder errors or disk paths. */
@@ -66,7 +67,7 @@ export async function normalizeImage(buffer: Buffer): Promise<Buffer> {
 /** Single-instance manifest storage serializes replacements across both frames. */
 export class FramePictureStore {
   private queue: Promise<unknown> = Promise.resolve();
-  constructor(private readonly directory: string) {}
+  constructor(readonly directory: string) {}
 
   private async snapshot(): Promise<FramePicture[]> {
     await mkdir(this.directory, { recursive: true });
@@ -76,7 +77,7 @@ export class FramePictureStore {
       raw = await readFile(manifest, 'utf8');
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-      // Only initialize genuinely empty storage; an orphan JPEG signals a failed commit.
+      // Only initialize genuinely empty storage; orphan media signals a failed commit.
       if ((await readdir(this.directory)).some((name) => !name.endsWith('.tmp')))
         throw new Error('Missing manifest');
       const frames = ['left', 'right'].map((frameId) => ({
@@ -99,12 +100,13 @@ export class FramePictureStore {
           throw new Error('Invalid empty frame');
       } else {
         if (
-          frame.imageUrl !== this.url(id, frame.revision) ||
+          !['image', 'video'].includes(frame.mediaType ?? 'image') ||
+          frame.imageUrl !== this.url(id, frame.revision, frame.mediaType) ||
           !Number.isSafeInteger(frame.updatedAt) ||
           frame.updatedAt < 0
         )
           throw new Error('Invalid metadata');
-        await readFile(this.imagePath(id, frame.revision));
+        await readFile(this.imagePath(id, frame.revision, frame.mediaType));
       }
     }
     await this.cleanup(frames as FramePicture[]);
@@ -114,7 +116,7 @@ export class FramePictureStore {
   private async cleanup(frames: FramePicture[]): Promise<void> {
     // Delay orphan/history deletion so in-flight readers keep their immutable bytes.
     for (const name of await readdir(this.directory)) {
-      const match = /^(left|right)-(\d+)\.jpg$/.exec(name);
+      const match = /^(left|right)-(\d+)\.(jpg|mp4)$/.exec(name);
       if (!match && !/^[\da-f-]+\.tmp$/.test(name)) continue;
       if (match) {
         const current = frames[match[1] === 'left' ? 0 : 1].revision;
@@ -126,11 +128,13 @@ export class FramePictureStore {
     }
   }
 
-  private url(id: FrameId, revision: number): string {
-    return `/api/frame-pictures/${id}/images/${revision}.jpg`;
+  private url(id: FrameId, revision: number, mediaType = 'image'): string {
+    return mediaType === 'video'
+      ? `/api/frame-pictures/${id}/videos/${revision}.mp4`
+      : `/api/frame-pictures/${id}/images/${revision}.jpg`;
   }
-  private imagePath(id: FrameId, revision: number): string {
-    return path.join(this.directory, `${id}-${revision}.jpg`);
+  private imagePath(id: FrameId, revision: number, mediaType = 'image'): string {
+    return path.join(this.directory, `${id}-${revision}.${mediaType === 'video' ? 'mp4' : 'jpg'}`);
   }
 
   /** Returns one committed snapshot; corruption never resets revision counters. */
@@ -168,7 +172,11 @@ export class FramePictureStore {
   }
 
   /** Publishes immutable bytes before atomically replacing the shared manifest. */
-  async replace(id: FrameId, jpeg: Buffer): Promise<FramePicture> {
+  async replace(
+    id: FrameId,
+    media: Buffer,
+    mediaType: 'image' | 'video' = 'image',
+  ): Promise<FramePicture> {
     const operation = this.queue.then(async () => {
       const frames = await this.snapshot();
       const index = id === 'left' ? 0 : 1;
@@ -177,17 +185,18 @@ export class FramePictureStore {
       const frame: FramePicture = {
         frameId: id,
         revision,
-        imageUrl: this.url(id, revision),
+        imageUrl: this.url(id, revision, mediaType),
+        mediaType,
         updatedAt: Date.now(),
       };
       // Exclusive creation prevents a failed earlier commit from overwriting immutable bytes.
-      const imagePath = this.imagePath(id, revision);
+      const imagePath = this.imagePath(id, revision, mediaType);
       const temporary = path.join(this.directory, `${randomUUID()}.tmp`);
       let published = false;
       try {
         const file = await open(temporary, 'wx');
         try {
-          await file.writeFile(jpeg);
+          await file.writeFile(media);
           await file.sync();
         } finally {
           await file.close();
@@ -213,11 +222,15 @@ export class FramePictureStore {
   }
 
   /** Only serves revisions referenced by or older than the committed manifest. */
-  async image(id: FrameId, revision: number): Promise<Buffer | undefined> {
+  async image(
+    id: FrameId,
+    revision: number,
+    mediaType: 'image' | 'video' = 'image',
+  ): Promise<Buffer | undefined> {
     const frames = await this.list();
     if (revision > frames[id === 'left' ? 0 : 1].revision) return undefined;
     try {
-      return await readFile(this.imagePath(id, revision));
+      return await readFile(this.imagePath(id, revision, mediaType));
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
       throw error;
