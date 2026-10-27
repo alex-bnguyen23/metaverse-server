@@ -25,6 +25,44 @@ function inbox(socket) {
       : new Promise((resolve) => waiting.push(resolve));
 }
 
+// Model validation must reject mismatches before a socket can create a player.
+test('character selections normalize legacy joins and reject invalid combinations', () => {
+  const parse = (payload) => parseClientMessage({ type: 'player:join', payload });
+  assert.equal(parse(join.payload).payload.model, 'custom');
+  for (const model of ['custom', 'person2', 'ceo']) {
+    const payload = {
+      name: ' Selected ',
+      model,
+      appearance: model === 'custom' ? appearance : null,
+    };
+    assert.deepEqual(parse(payload).payload, { ...payload, name: 'Selected' });
+  }
+  for (const payload of [
+    { name: 'X', model: null, appearance },
+    { name: 'X', model: '/models/evil.glb', appearance },
+    { name: 'X', model: 'custom', appearance: null },
+    { name: 'X', appearance: null },
+    ...['person3', 'person2', 'ceo'].flatMap((model) => [
+      { name: 'X', model, appearance },
+      { name: 'X', model },
+    ]),
+  ])
+    assert.equal(parse(payload), undefined);
+  for (const model of ['person3', 'person2', 'ceo']) {
+    const player = createPlayer(parse({ name: 'X', model, appearance: null }).payload);
+    applyPlayerMovement(player, {
+      sequence: 0,
+      position: { x: 1, y: 0, z: 0 },
+      rotation: 0,
+      animation: 'Walk',
+      model: 'custom',
+      appearance,
+    });
+    assert.equal(player.model, model);
+    assert.equal(player.appearance, null);
+  }
+});
+
 test('validation rejects invalid customization and non-finite input', () => {
   assert.equal(
     parseClientMessage({
@@ -98,12 +136,16 @@ test(
     assert.equal(init.type, 'world:init');
     assert.deepEqual(init.payload.players[0].appearance, appearance);
     const second = await connect();
-    second.socket.send(JSON.stringify(join));
+    second.socket.send(
+      JSON.stringify({ ...join, payload: { name: 'Fixed', model: 'person2', appearance: null } }),
+    );
     const secondInit = await second.next();
     assert.equal(secondInit.payload.players.length, 2);
     const joined = await first.next();
     assert.equal(joined.type, 'player:joined');
-    assert.deepEqual(joined.payload.player.appearance, appearance);
+    assert.equal(joined.payload.player.model, 'person2');
+    assert.equal(joined.payload.player.appearance, null);
+    assert.equal(secondInit.payload.players[0].model, 'custom');
     first.socket.send(
       JSON.stringify({
         type: 'player:move',
@@ -129,6 +171,7 @@ test(
     assert.equal((await first.next()).type, 'chat:message');
     assert.equal((await second.next()).type, 'chat:message');
     assert.equal('appearance' in update.payload, false);
+    assert.equal('model' in update.payload, false);
     // Replays must fail, and unchanged reports must not produce peer updates.
     const report = (sequence) =>
       first.socket.send(

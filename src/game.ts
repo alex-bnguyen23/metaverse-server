@@ -13,14 +13,19 @@ export type Appearance = {
 export type Vector3 = { x: number; y: number; z: number };
 export type AnimationState = 'Idle' | 'Walk' | 'Run';
 
+/** Fixed models cannot carry custom materials; selection is stored once per session. */
+export type CharacterSelection =
+  { model: 'custom'; appearance: Appearance } | { model: 'person3' | 'person2' | 'ceo'; appearance: null };
+
+export type PlayerJoinPayload = { name: string } & CharacterSelection;
+
 export type PlayerState = {
   id: string;
   name: string;
-  appearance: Appearance;
   position: Vector3;
   rotation: number;
   animation: 'Idle' | 'Walk' | 'Run';
-};
+} & CharacterSelection;
 
 export type PlayerMovement = {
   sequence: number;
@@ -30,7 +35,7 @@ export type PlayerMovement = {
 };
 export type ClientMessage =
   | VehicleMessage
-  | { type: 'player:join'; payload: { name: string; appearance: Appearance } }
+  | { type: 'player:join'; payload: PlayerJoinPayload }
   | { type: 'player:move'; payload: PlayerMovement }
   | { type: 'chat:send'; payload: ChatSendPayload };
 
@@ -50,8 +55,19 @@ export function parseClientMessage(value: unknown): ClientMessage | undefined {
     return payload ? { type: 'chat:send', payload } : undefined;
   }
   if (value.type === 'player:join') {
+    if (typeof data.name !== 'string' || !data.name.trim() || data.name.trim().length > 24) return;
+    // Legacy clients may omit model, but explicit null and unknown IDs must fail validation.
+    const model = Object.prototype.hasOwnProperty.call(data, 'model') ? data.model : 'custom';
+    if (model === 'person3' || model === 'person2' || model === 'ceo') {
+      if (data.appearance !== null) return;
+      return {
+        type: 'player:join',
+        payload: { name: data.name.trim(), model, appearance: null },
+      };
+    }
     const appearance = data.appearance;
     if (
+      model !== 'custom' ||
       typeof data.name !== 'string' ||
       data.name.trim().length < 1 ||
       data.name.trim().length > 24 ||
@@ -66,6 +82,7 @@ export function parseClientMessage(value: unknown): ClientMessage | undefined {
       type: 'player:join',
       payload: {
         name: data.name.trim(),
+        model,
         appearance: {
           shirt: appearance.shirt as Appearance['shirt'],
           pants: appearance.pants as Appearance['pants'],

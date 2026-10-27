@@ -20,6 +20,8 @@
 
 ## Shared Data Types
 
+The backend supports `custom`, `person2`, and `ceo` selection. See [CHARACTER_SELECTION.md](CHARACTER_SELECTION.md) for validation, rendering requirements and coordinated frontend rollout.
+
 ```ts
 export type Appearance = {
   shirt: 0 | 1 | 2;
@@ -36,14 +38,18 @@ export type Vector3 = {
 
 export type AnimationState = 'Idle' | 'Walk' | 'Run';
 
+export type CharacterSelection =
+  { model: 'custom'; appearance: Appearance } | { model: 'person2' | 'ceo'; appearance: null };
+
+export type PlayerJoinPayload = { name: string } & CharacterSelection;
+
 export type PlayerState = {
   id: string;
   name: string;
-  appearance: Appearance;
   position: Vector3;
   rotation: number;
   animation: AnimationState;
-};
+} & CharacterSelection;
 
 export type PlayerMovement = {
   sequence: number;
@@ -57,13 +63,14 @@ export type PlayerMovement = {
 
 ### `player:join`
 
-Sent once after the player finishes customizing their appearance.
+Sent once after character selection. `custom` requires valid appearance; `person2` and `ceo` require explicit `appearance: null`. Missing model normalizes to `custom` only with valid appearance. Null/unknown models and invalid combinations receive `INVALID_MESSAGE` without creating a player.
 
 ```json
 {
   "type": "player:join",
   "payload": {
     "name": "Player1",
+    "model": "custom",
     "appearance": {
       "shirt": 1,
       "pants": 0,
@@ -127,6 +134,7 @@ Sent only to the joining player after successful validation.
       {
         "id": "player-123",
         "name": "Player1",
+        "model": "custom",
         "appearance": {
           "shirt": 1,
           "pants": 0,
@@ -142,7 +150,7 @@ Sent only to the joining player after successful validation.
 }
 ```
 
-The `players` array includes the joining player and all existing players.
+The `players` array includes the joining player and all existing players. Every full PlayerState includes normalized model and appearance, including `player:joined` and non-null `vehicle:released.payload.player`. Selection remains fixed until disconnect; reconnect validates a new selection and assigns a fresh ID.
 
 ### `player:joined`
 
@@ -155,6 +163,7 @@ Broadcast to existing players when someone successfully joins.
     "player": {
       "id": "player-456",
       "name": "Player2",
+      "model": "custom",
       "appearance": {
         "shirt": 2,
         "pants": 1,
@@ -273,18 +282,18 @@ Other error codes may include:
 - Use event-driven WebSocket messages.
 - Movement updates should be limited to 20 messages per second per player.
 - Do not broadcast unchanged player states.
-- Do not include appearance in movement messages.
+- Do not include model or appearance in movement messages. Extra selection fields are discarded and cannot change stored selection.
 - Do not send complete world state on every update.
 - Use WebSocket ping/pong to detect disconnected clients.
 - Prevent excessive queued messages for slow connections.
 
 ## Vehicle Protocol Extension
 
-The backend implements this contract for driving the Cybertruck. Frontend integration must supply matching message types, validation, controls, and rendering before rollout; frontend compatibility has not been verified in this repository. Existing walking and chat messages remain unchanged.
+The backend contract is implemented by the frontend message types, validation, driving controls, and rendering. Automated transport tests verify the wire messages; live backend/browser integration still requires verification. Existing walking and chat messages remain unchanged.
 
 ### Shared Configuration
 
-`src/vehicle.ts` exports `vehicleConfig` with the agreed frontend values:
+The backend exports `vehicleConfig` from its `src/vehicle.ts`; the frontend uses the same bounds and limits in `src/network/protocol.ts` and `src/vehicles/VehicleController.ts`:
 
 ```ts
 const vehicleConfig = {
@@ -410,7 +419,7 @@ WASD controls acceleration/reverse and steering locally. Send changed state at a
 
 ### Exiting
 
-Pressing E while driving first brakes to a stop and sends the final stopped `vehicle:move`. The frontend then collision-checks a nearby exit location and sends:
+Pressing E while driving brakes to a stop and collision-checks a nearby exit location. The frontend freezes its stopped prediction, sends the final stopped `vehicle:move`, waits for the matching `vehicle:update` acknowledgement with `speed: 0`, and then sends:
 
 ```json
 {
@@ -460,7 +469,7 @@ Keep the existing multiplayer chat protocol unchanged.
 
 ## Shared Frame Picture HTTP API
 
-The proposed upload-and-replace API is specified in [FRAME_PICTURES.md](FRAME_PICTURES.md). Implement `GET /api/frame-pictures`, `PUT /api/frame-pictures/:frameId` using multipart field `image`, and versioned JPEG/MP4 downloads. Video uploads accept H.264 MP4 up to 50 MiB and store the original bytes after container-header validation, without FFmpeg or FFprobe; WebM uploads are unsupported. The additive video extension uses the same multipart field `image`, with `mediaType: "video"` and a versioned video path in the legacy `imageUrl` response field. Both `left` and `right` are shared across all visitors; any visitor may upload. Persist files and revisions on durable storage. The initial contract uses HTTP polling and adds no WebSocket events or `world:init` fields. The frontend uses this HTTP contract; the separate backend must implement it before shared uploads work.
+The proposed upload-and-replace API is specified in [FRAME_PICTURES.md](FRAME_PICTURES.md). Implement `GET /api/frame-pictures`, `PUT /api/frame-pictures/:frameId` using multipart field `image`, and versioned JPEG/MP4 downloads. The additive video extension uses the same multipart field `image`, with `mediaType: "video"` and a versioned video path in the legacy `imageUrl` response field. Both `left` and `right` are shared across all visitors; any visitor may upload. Persist files and revisions on durable storage. The initial contract uses HTTP polling and adds no WebSocket events or `world:init` fields. The frontend uses this HTTP contract; the separate backend must implement it before shared uploads work.
 
 ## Protocol Compliance
 

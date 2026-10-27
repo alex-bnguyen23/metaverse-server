@@ -165,7 +165,7 @@ test(
     const first = await connect();
     first.send(request('vehicle:enter'));
     assert.equal((await first.next()).payload.code, 'NOT_JOINED');
-    first.send(join);
+    first.send({ ...join, payload: { name: 'CEO', model: 'ceo', appearance: null } });
     const init = await first.next();
     assert.equal(init.payload.vehicles.length, 1);
     assert.deepEqual(init.payload.vehicles[0].position, position);
@@ -207,6 +207,7 @@ test(
       late.payload.players.find((p) => p.id === init.payload.playerId).position,
       position,
     );
+    assert.equal(late.payload.players.find((p) => p.id === init.payload.playerId).model, 'ceo');
     await first.next();
     await second.next();
     first.send(request('vehicle:move', { ...movement, sequence: 1, speed: 0 }));
@@ -217,6 +218,8 @@ test(
       const release = await client.next();
       assert.equal(release.type, 'vehicle:released');
       assert.equal(release.payload.reason, 'exit');
+      assert.equal(release.payload.player.model, 'ceo');
+      assert.equal(release.payload.player.appearance, null);
       assert.equal(release.payload.vehicle.revision, 2);
     }
     // Reusing the walking sequence rejected while seated proves it was not consumed.
