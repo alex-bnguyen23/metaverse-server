@@ -12,9 +12,12 @@ export const vehicleConfig = {
   exitRadius: 3,
 } as const;
 
+export type VehicleSeat = 'driver' | 'passenger';
+
 export type VehicleState = {
   id: 'cybertruck-1';
   driverId: string | null;
+  passengerId: string | null;
   revision: number;
   position: Vector3;
   rotation: number;
@@ -32,7 +35,7 @@ export type VehicleMovement = VehicleRequest & {
   wheelAngle: number;
 };
 export type VehicleMessage =
-  | { type: 'vehicle:enter'; payload: VehicleRequest }
+  | { type: 'vehicle:enter'; payload: VehicleRequest & { seat: VehicleSeat } }
   | { type: 'vehicle:exit'; payload: VehicleRequest & { position: Vector3; rotation: number } }
   | { type: 'vehicle:move'; payload: VehicleMovement };
 
@@ -55,7 +58,10 @@ export function parseVehicleMessage(
 ): VehicleMessage | undefined {
   if (typeof data.vehicleId !== 'string' || !counter(data.revision)) return;
   const request = { vehicleId: data.vehicleId, revision: data.revision };
-  if (type === 'vehicle:enter') return { type, payload: request };
+  if (type === 'vehicle:enter') {
+    if (data.seat !== 'driver' && data.seat !== 'passenger') return;
+    return { type, payload: { ...request, seat: data.seat } };
+  }
   if (!vector(data.position) || !finite(data.rotation)) return;
   const transform = { position: { ...data.position }, rotation: data.rotation };
   if (type === 'vehicle:exit') return { type, payload: { ...request, ...transform } };
@@ -97,6 +103,7 @@ export class SharedVehicle {
   readonly state: VehicleState = {
     id: vehicleConfig.id,
     driverId: null,
+    passengerId: null,
     revision: 0,
     position: { ...vehicleConfig.spawn.position },
     rotation: vehicleConfig.spawn.rotation,
@@ -116,29 +123,34 @@ export class SharedVehicle {
     if (message.type !== 'vehicle:move' && state.revision === Number.MAX_SAFE_INTEGER)
       return 'INVALID_VEHICLE_STATE';
     if (message.type === 'vehicle:enter') {
-      if (state.driverId === player.id) return 'ALREADY_DRIVING';
-      if (state.driverId !== null) return 'VEHICLE_OCCUPIED';
+      if (this.seatOf(player.id)) return 'ALREADY_IN_VEHICLE';
+      // Reserve safe revisions for both occupants to disconnect without overflow.
+      if (state.revision >= Number.MAX_SAFE_INTEGER - 2) return 'INVALID_VEHICLE_STATE';
+      if (state.speed !== 0) return 'VEHICLE_MOVING';
+      const key = message.payload.seat === 'driver' ? 'driverId' : 'passengerId';
+      if (state[key] !== null) return 'VEHICLE_OCCUPIED';
       if (!nearby(player.position, state.position, vehicleConfig.enterRadius))
         return 'VEHICLE_TOO_FAR';
-      state.driverId = player.id;
+      state[key] = player.id;
       this.transition();
-      this.syncDriver(player);
+      this.syncPlayer(player);
       return;
     }
-    if (state.driverId !== player.id) return 'NOT_VEHICLE_DRIVER';
     if (message.type === 'vehicle:exit') {
+      if (!this.seatOf(player.id)) return 'NOT_IN_VEHICLE';
       if (state.speed !== 0) return 'VEHICLE_MOVING';
       if (
         !withinVehicleBounds(message.payload.position) ||
         !nearby(message.payload.position, state.position, vehicleConfig.exitRadius)
       )
         return 'INVALID_EXIT_POSITION';
-      this.release();
+      this.release(player.id);
       player.position = { ...message.payload.position };
       player.rotation = message.payload.rotation;
       player.animation = 'Idle';
       return;
     }
+    if (state.driverId !== player.id) return 'NOT_VEHICLE_DRIVER';
     const movement = message.payload;
     if (movement.sequence <= this.lastSequence) return 'STALE_VEHICLE_SEQUENCE';
     if (
@@ -154,24 +166,43 @@ export class SharedVehicle {
     state.steering = movement.steering;
     state.wheelAngle = movement.wheelAngle;
     this.lastSequence = movement.sequence;
-    this.syncDriver(player);
+    this.syncPlayer(player);
   }
 
-  /** Stop at the last accepted transform, preserving wheel spin across leases. */
-  release(): void {
-    this.state.driverId = null;
-    this.transition();
+  /** Resolve seat ownership from server state, never from client identities. */
+  seatOf(playerId: string): VehicleSeat | undefined {
+    if (this.state.driverId === playerId) return 'driver';
+    if (this.state.passengerId === playerId) return 'passenger';
+    return undefined;
   }
 
-  private transition(): void {
+  /** Release one seat; a disconnected passenger must not brake the driver. */
+  release(playerId: string, disconnected = false): void {
+    const seat = this.seatOf(playerId);
+    if (!seat) return;
+    this.state[seat === 'driver' ? 'driverId' : 'passengerId'] = null;
+    this.transition(disconnected && seat === 'passenger');
+  }
+
+  /** Keep late-join player snapshots aligned with both seated occupants. */
+  syncOccupants(players: ReadonlyMap<string, PlayerState>): void {
+    for (const id of [this.state.driverId, this.state.passengerId]) {
+      const player = id === null ? undefined : players.get(id);
+      if (player) this.syncPlayer(player);
+    }
+  }
+
+  private transition(preserveMotion = false): void {
     this.state.revision += 1;
-    this.state.speed = 0;
-    this.state.steering = 0;
+    if (!preserveMotion) {
+      this.state.speed = 0;
+      this.state.steering = 0;
+    }
     this.lastSequence = -1;
   }
 
-  private syncDriver(player: PlayerState): void {
-    // Late joiners receive the driver's seated transform through the existing players array.
+  private syncPlayer(player: PlayerState): void {
+    // Visual seat offsets belong to clients; stored feet positions stay at the pivot.
     player.position = { ...this.state.position };
     player.rotation = this.state.rotation;
     player.animation = 'Idle';

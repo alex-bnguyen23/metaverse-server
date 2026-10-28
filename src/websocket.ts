@@ -180,17 +180,25 @@ export function initializeWebSocket(server: Server): WebSocketServer {
           return;
         }
         times.push(now);
+        const seat = vehicle.seatOf(session.player.id);
         const code = vehicle.apply(session.player, message);
         if (code) {
           reject(socket, code, 'Vehicle request rejected.', context);
           return;
         }
+        vehicle.syncOccupants(players);
         // Synchronous validation and mutation complete before any occupancy broadcast.
         if (message.type === 'vehicle:enter')
-          broadcast('vehicle:occupied', { vehicle: vehicle.state });
+          broadcast('vehicle:occupied', {
+            vehicle: vehicle.state,
+            playerId: session.player.id,
+            seat: message.payload.seat,
+          });
         else if (message.type === 'vehicle:exit')
           broadcast('vehicle:released', {
             vehicle: vehicle.state,
+            playerId: session.player.id,
+            seat,
             player: session.player,
             reason: 'exit',
           });
@@ -201,12 +209,18 @@ export function initializeWebSocket(server: Server): WebSocketServer {
           });
         return;
       }
-      if (vehicle.state.driverId === session.player.id) {
-        reject(socket, 'PLAYER_DRIVING', 'Walking is disabled while driving.', {
-          requestType: message.type,
-          vehicleId: vehicle.state.id,
-          revision: vehicle.state.revision,
-        });
+      const occupiedSeat = vehicle.seatOf(session.player.id);
+      if (occupiedSeat) {
+        reject(
+          socket,
+          occupiedSeat === 'driver' ? 'PLAYER_DRIVING' : 'PLAYER_IN_VEHICLE',
+          'Walking is disabled while seated.',
+          {
+            requestType: message.type,
+            vehicleId: vehicle.state.id,
+            revision: vehicle.state.revision,
+          },
+        );
         return;
       }
       // A session owns its ID; stale packets cannot overwrite its latest reported state.
@@ -233,10 +247,14 @@ export function initializeWebSocket(server: Server): WebSocketServer {
       sessions.delete(socket);
       if (!session.player) return;
       // Release before player:left so peers never retain an occupant that no longer exists.
-      if (vehicle.state.driverId === session.player.id) {
-        vehicle.release();
+      const seat = vehicle.seatOf(session.player.id);
+      if (seat) {
+        vehicle.release(session.player.id, true);
+        vehicle.syncOccupants(players);
         broadcast('vehicle:released', {
           vehicle: vehicle.state,
+          playerId: session.player.id,
+          seat,
           player: null,
           reason: 'disconnect',
         });

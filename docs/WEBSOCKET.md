@@ -31,15 +31,16 @@ The server trims text, accepts up to 200 Unicode code points, and permits one ac
 
 ## Vehicles
 
-`world:init` includes the current shared `cybertruck-1`, initially at `(-35, 0, 0)` with heading `Math.PI / 2`. See [PROTOCOLS.md](PROTOCOLS.md#vehicle-protocol-extension) for schemas, shared limits, and frontend integration requirements.
+The backend implements [VEHICLE_PASSENGER.md](VEHICLE_PASSENGER.md): one driver and one passenger in `cybertruck-1`. Coordinate frontend deployment and reconnect existing sessions.
 
-- Send `vehicle:enter` with `{ vehicleId, revision }` within 3 world units. Wait for `vehicle:occupied` before driving.
-- Send `vehicle:move` with `{ vehicleId, revision, sequence, position, rotation, speed, steering, wheelAngle }` at up to 20 Hz. All joined clients, including the driver, receive `vehicle:update` with `{ vehicle, sequence }`.
-- Stop with an accepted `speed: 0` report, then send `vehicle:exit` with `{ vehicleId, revision, position, rotation }`. The frontend must collision-check the exit point within 3 units. Wait for `vehicle:released` before resuming walking.
-- Enter/exit share a separate limit of 2 requests per second. Walking while driving receives `PLAYER_DRIVING` without consuming the walking sequence. Continue that sequence after exit; vehicle sequences start at zero for each new driving lease.
-- Disconnect releases occupancy and stops the vehicle before broadcasting `player:left`. The parked transform and wheel angle survive an empty room until server restart.
+- Send `vehicle:enter` with `{ vehicleId, revision, seat }`, where seat is `driver` or `passenger`, while stopped within 3 units. Wait for `vehicle:occupied` with `{ vehicle, playerId, seat }`.
+- Only the driver sends `vehicle:move`. All joined clients receive `vehicle:update` with `{ vehicle, sequence }`. Both occupants stop walking reports.
+- Either occupant may exit while stopped using `{ vehicleId, revision, position, rotation }`. Releases contain `{ vehicle, playerId, seat, reason, player }`; only the departing occupant resumes walking.
+- Every seat transition increments revision and resets vehicle sequences, including passenger transitions. Walking sequences remain unchanged.
+- Driver disconnect stops the truck and retains the passenger. Passenger disconnect preserves driver motion. Releases precede `player:left`.
+- Movement has a separate rolling 20 requests/second budget; entry/exit share 2 requests/second. Rejections include current revision and request context.
 
-Vehicle rejections use `server:error`; processed vehicle requests include `requestType`, `vehicleId`, and the current `revision`. Malformed requests use the existing `INVALID_MESSAGE` response. No backend vehicle physics or collision simulation runs.
+No backend vehicle physics or collision simulation runs. See the contract for bounds, errors, exit acknowledgement requirements and client synchronization.
 
 ## Connection handling
 
